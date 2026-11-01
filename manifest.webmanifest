@@ -1,0 +1,9 @@
+{
+  "name": "WizNote My",
+  "short_name": "WizNote My",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb"
+}

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="WizNote My">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://www.googleapis.com; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
+<title>WizNote My 測試</title>
+</head>
+<body>
+<main>
+  <h1>WizNote My 手機版測試</h1>
+  <p class="muted">這頁只測試 Google 登入和讀取，不會修改任何檔案，也不會把內容傳到其他地方。</p>
+  <p>目前開啟方式：<strong id="mode"></strong></p>
+  <button id="login" type="button">登入 Google 並開始測試</button>
+  <ul id="results"></ul>
+  <p id="note" class="muted" hidden>請截圖這個畫面傳回去。</p>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
