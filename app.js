@@ -25,6 +25,7 @@ const state = {
   byId: new Map(),
   searchText: null,
   searchSize: 0,
+  folderOrder: {},
   tab: 'all',
   folder: '',
   query: '',
@@ -193,6 +194,8 @@ async function refreshIndex() {
     if (found.list.md5Checksum !== await kvGet('list-md5')) {
       const data = await gunzipJson(await media(found.list.id));
       setNotes(data.notes);
+      state.folderOrder = data.folderOrder || {};
+      await kvSet('folder-order', state.folderOrder);
       await kvSet('list', data.notes);
       await kvSet('list-md5', found.list.md5Checksum);
       renderHome();
@@ -313,7 +316,10 @@ function renderFolders() {
     const name = n.f.slice(prefix.length).split('/')[0];
     counts.set(name, (counts.get(name) || 0) + 1);
   }
-  box.replaceChildren(...[...counts].sort((a, b) => a[0].localeCompare(b[0], 'zh-Hant')).map(([name, count]) => {
+  // 和電腦版相同的手動排序；沒排過的依名稱排在後面
+  const manual = state.folderOrder[state.folder] || [];
+  const rank = (name) => { const i = manual.indexOf(name); return i < 0 ? Infinity : i; };
+  box.replaceChildren(...[...counts].sort((a, b) => (rank(a[0]) === rank(b[0]) ? a[0].localeCompare(b[0], 'zh-Hant') : rank(a[0]) - rank(b[0]))).map(([name, count]) => {
     const row = el('button', { className: 'folder-row', type: 'button' },
       el('span', { className: 'n', textContent: name }), el('span', { className: 'c', textContent: count }), el('span', { className: 'c', textContent: '›' }));
     row.dataset.folder = prefix + name;
@@ -673,6 +679,7 @@ function bindEvents() {
     await kvClear();
     state.searchText = null;
     await kvSet('list', state.notes);
+    await kvSet('folder-order', state.folderOrder);
     $('sheet').hidden = true;
     toast('已清除離線內容');
     refreshIndex();
@@ -719,6 +726,7 @@ async function start() {
   state.order = pref('wiznote-order') || 'desc';
   const cached = await kvGet('list');
   if (cached) setNotes(cached);
+  state.folderOrder = (await kvGet('folder-order')) || {};
 
   if (!cached && !token()) {
     $('login-view').hidden = false;
