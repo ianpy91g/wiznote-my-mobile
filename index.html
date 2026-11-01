@@ -5,21 +5,83 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="WizNote My">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://www.googleapis.com; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data: https:; connect-src https://www.googleapis.com https://*.googleusercontent.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="stylesheet" href="style.css">
-<title>WizNote My 測試</title>
+<title>WizNote My</title>
 </head>
 <body>
-<main>
-  <h1>WizNote My 手機版測試</h1>
-  <p class="muted">這頁只測試 Google 登入和讀取，不會修改任何檔案，也不會把內容傳到其他地方。</p>
-  <p>目前開啟方式：<strong id="mode"></strong></p>
-  <button id="login" type="button">登入 Google 並開始測試</button>
-  <ul id="results"></ul>
-  <p id="note" class="muted" hidden>請截圖這個畫面傳回去。</p>
-</main>
+<div id="login-view" class="center" hidden>
+  <img src="icons/icon-180.png" alt="" width="84" height="84">
+  <h1>WizNote My</h1>
+  <p class="muted">閱讀電腦版同步到 Google 雲端硬碟的筆記。手機版只看不改。</p>
+  <button id="login" class="primary" type="button">登入 Google</button>
+</div>
+
+<div id="home-view" hidden>
+  <header class="bar">
+    <div class="bar-row">
+      <button id="folder-back" class="icon" type="button" aria-label="回上一層" hidden>‹</button>
+      <h1 id="home-title">全部筆記</h1>
+      <button id="settings" class="icon" type="button" aria-label="設定">⚙︎</button>
+    </div>
+    <input id="search" type="search" placeholder="搜尋標題與摘要" aria-label="搜尋" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="tabs" role="tablist">
+      <button class="tab" type="button" role="tab" data-tab="all">全部</button>
+      <button class="tab" type="button" role="tab" data-tab="fav">♥ 最愛</button>
+      <button class="tab" type="button" role="tab" data-tab="folders">分類</button>
+    </div>
+    <div id="banner" class="banner" hidden></div>
+  </header>
+  <div class="sortbar">
+    <span id="count" class="muted"></span>
+    <select id="sort" aria-label="排序方式">
+      <option value="m">修改時間</option>
+      <option value="c">建立時間</option>
+      <option value="t">標題</option>
+    </select>
+    <button id="order" type="button"></button>
+  </div>
+  <div id="folders" hidden></div>
+  <button id="search-full" class="wide" type="button" hidden></button>
+  <div id="list"></div>
+  <div id="sentinel"></div>
+</div>
+
+<div id="note-view" hidden>
+  <header class="bar">
+    <div class="bar-row">
+      <button id="note-back" class="icon" type="button" aria-label="返回">‹</button>
+      <span id="note-fav" class="fav" hidden>♥</span>
+      <h1 id="note-title"></h1>
+    </div>
+  </header>
+  <div id="note-banner" class="banner" hidden></div>
+  <article>
+    <p id="note-meta" class="muted"></p>
+    <div id="note-actions" class="actions"></div>
+    <div id="note-body" class="content"></div>
+  </article>
+</div>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-box">
+    <h2>設定</h2>
+    <p id="sheet-account" class="muted"></p>
+    <p id="sheet-storage" class="muted"></p>
+    <button id="refresh" class="wide" type="button">立即更新筆記清單</button>
+    <button id="clear-cache" class="wide" type="button">清除手機上的離線內容</button>
+    <button id="logout" class="wide" type="button">登出</button>
+    <button id="sheet-close" class="wide primary" type="button">關閉</button>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+<script src="vendor/marked.umd.js"></script>
+<script src="vendor/purify.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -1,82 +1,741 @@
 'use strict';
-// 只驗證兩件事：這個網頁用戶端讀得到電腦版上傳的檔案嗎？iPhone 主畫面 App 能完成 Google 登入嗎？
-// 存取權杖只放在記憶體，畫面也不顯示檔名或內容。
+/* global marked, DOMPurify */
+// WizNote My 手機版：唯讀。只有下載，程式裡沒有任何寫入雲端的呼叫。
+// 筆記清單來自電腦版上傳的索引；內文和圖片點開時才下載，看過的存在手機上。
+
 const CLIENT_ID = '77837898411-r25e1qo9igtg0ib314ccr5ud77l7uv70.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const API = 'https://www.googleapis.com/drive/v3/files';
-const STATE_KEY = 'wiznote-oauth-state';
+const MOBILE_FOLDER = 'WizNote My Mobile';
+const LIST_FILE = 'index.json.gz';
+const SEARCH_FILE = 'search.json.gz';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const PAGE = 100;
 
 const $ = (id) => document.getElementById(id);
-const standalone = window.navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
-$('mode').textContent = standalone ? '主畫面 App' : 'Safari／瀏覽器分頁';
+const el = (tag, props = {}, ...children) => {
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  e.append(...children);
+  return e;
+};
 
-function report(ok, text) {
-  const li = document.createElement('li');
-  li.className = ok ? 'ok' : 'bad';
-  li.textContent = `${ok ? '✓' : '✗'} ${text}`;
-  $('results').append(li);
-  $('note').hidden = false;
+const state = {
+  notes: [],
+  byId: new Map(),
+  searchText: null,
+  searchSize: 0,
+  tab: 'all',
+  folder: '',
+  query: '',
+  sort: 'm',
+  order: 'desc',
+  shown: [],
+  rendered: 0,
+  current: null,
+  objectUrls: [],
+  refreshing: false,
+};
+
+// ---- 手機儲存 ----
+
+function pref(key, value) {
+  try {
+    if (value === undefined) return localStorage.getItem(key);
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* 私密瀏覽等情況沒有儲存空間，仍可正常閱讀 */ }
+  return null;
 }
 
-function storage(action) {
-  try {
-    return action(localStorage);
-  } catch {
-    return null;
+let dbPromise = null;
+function db() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open('wiznote-my', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('kv');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
   }
+  return dbPromise;
+}
+
+async function store(mode, fn) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction('kv', mode);
+    const req = fn(tx.objectStore('kv'));
+    tx.oncomplete = () => resolve(req?.result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+const kvGet = (k) => store('readonly', (s) => s.get(k)).catch(() => undefined);
+// 手機空間不足時存不進去不算錯誤，內容這次照樣顯示
+const kvSet = (k, v) => store('readwrite', (s) => s.put(v, k)).catch(() => undefined);
+const kvClear = () => store('readwrite', (s) => s.clear()).catch(() => undefined);
+
+// ---- 登入 ----
+
+class AuthError extends Error {}
+
+function token() {
+  try {
+    const t = JSON.parse(pref('wiznote-token') || 'null');
+    if (t && t.exp > Date.now() + 30000) return t.value;
+  } catch { /* 視為未登入 */ }
+  return '';
 }
 
 function login() {
-  const state = crypto.randomUUID();
-  storage((s) => s.setItem(STATE_KEY, state));
+  const oauthState = crypto.randomUUID();
+  pref('wiznote-oauth-state', oauthState);
+  if (state.current) pref('wiznote-return-note', state.current.id);
+  const hint = pref('wiznote-account');
   const q = new URLSearchParams({
     client_id: CLIENT_ID,
     redirect_uri: location.origin + location.pathname,
     response_type: 'token',
     scope: SCOPE,
-    state,
-    prompt: 'select_account',
+    state: oauthState,
   });
+  if (hint) q.set('login_hint', hint);
+  else q.set('prompt', 'select_account');
   location.assign(`https://accounts.google.com/o/oauth2/v2/auth?${q}`);
 }
 
-async function listFiles(token, query, fields, pageSize) {
-  const q = new URLSearchParams({ q: query, spaces: 'drive', pageSize: String(pageSize), fields });
-  const res = await fetch(`${API}?${q}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`列出檔案失敗（HTTP ${res.status}）`);
-  return (await res.json()).files;
-}
-
-async function runTest(token) {
-  try {
-    const roots = await listFiles(token, "name='WizNote My' and mimeType='application/vnd.google-apps.folder' and trashed=false", 'files(id)', 10);
-    report(roots.length > 0, roots.length ? '找得到「WizNote My」資料夾' : '找不到「WizNote My」資料夾（可能是權限不足）');
-    const notes = await listFiles(token, "name contains '.md' and trashed=false", 'files(id,size)', 100);
-    report(notes.length > 0, notes.length ? `列得出筆記檔（這次取樣 ${notes.length} 個）` : '列不出任何筆記檔');
-    if (notes.length) {
-      const res = await fetch(`${API}/${encodeURIComponent(notes[0].id)}?alt=media`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) throw new Error(`下載筆記失敗（HTTP ${res.status}）`);
-      const size = (await res.arrayBuffer()).byteLength;
-      report(true, `成功下載一篇筆記（${size} 位元組）`);
-    }
-  } catch (e) {
-    report(false, e.message);
-  }
-}
-
-$('login').onclick = login;
-
-const back = new URLSearchParams(location.hash.slice(1));
-if (back.has('access_token') || back.has('error')) {
+// 回傳登入失敗的說明；不是從 Google 回來就回傳空字串
+function takeOauthResult() {
+  const back = new URLSearchParams(location.hash.slice(1));
+  if (!back.has('access_token') && !back.has('error')) return '';
   history.replaceState(null, '', location.pathname);
-  const expected = storage((s) => s.getItem(STATE_KEY));
-  storage((s) => s.removeItem(STATE_KEY));
-  if (back.has('error')) {
-    report(false, `Google 登入失敗：${back.get('error')}`);
-  } else if (!expected || expected !== back.get('state')) {
-    report(false, `登入回來後無法驗證（${expected ? '狀態不符' : '讀不到登入前的狀態'}），沒有使用這次的授權`);
-  } else {
-    report(true, `Google 登入成功，並回到${standalone ? '主畫面 App' : 'Safari／瀏覽器分頁'}`);
-    runTest(back.get('access_token'));
+  const expected = pref('wiznote-oauth-state');
+  pref('wiznote-oauth-state', null);
+  if (back.has('error')) return back.get('error') === 'access_denied' ? '已取消登入。' : `Google 登入失敗：${back.get('error')}`;
+  if (!expected || expected !== back.get('state')) return '登入驗證失敗，請再試一次。';
+  pref('wiznote-token', JSON.stringify({ value: back.get('access_token'), exp: Date.now() + Number(back.get('expires_in') || 3600) * 1000 }));
+  return '';
+}
+
+// 登出時一併清掉手機上的筆記，否則下一個拿到手機的人還是看得到
+async function logout() {
+  pref('wiznote-token', null);
+  pref('wiznote-account', null);
+  await kvClear();
+  location.reload();
+}
+
+// ---- Google Drive（只讀）----
+
+async function drive(url) {
+  const t = token();
+  if (!t) throw new AuthError('需要登入');
+  let res;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bearer ${t}` } });
+  } catch {
+    throw new Error('無法連線，請確認網路');
+  }
+  if (res.status === 401) {
+    pref('wiznote-token', null);
+    throw new AuthError('需要重新登入');
+  }
+  if (!res.ok) throw new Error(`Google Drive 回應 ${res.status}`);
+  return res;
+}
+
+async function listFiles(query, fields = 'id,name,mimeType,size,md5Checksum') {
+  const out = [];
+  let pageToken = '';
+  do {
+    const q = new URLSearchParams({ q: query, spaces: 'drive', pageSize: '1000', fields: `nextPageToken,files(${fields})` });
+    if (pageToken) q.set('pageToken', pageToken);
+    const data = await (await drive(`${API}?${q}`)).json();
+    out.push(...data.files);
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+  return out;
+}
+
+const media = (id) => drive(`${API}/${encodeURIComponent(id)}?alt=media`);
+
+async function gunzipJson(res) {
+  const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+  return JSON.parse(await new Response(stream).text());
+}
+
+// ---- 筆記清單 ----
+
+async function indexFiles() {
+  const folders = await listFiles(`name='${MOBILE_FOLDER}' and mimeType='${FOLDER_MIME}' and trashed=false`, 'id,createdTime');
+  if (!folders.length) return null;
+  folders.sort((a, b) => (a.createdTime || '').localeCompare(b.createdTime || '') || a.id.localeCompare(b.id));
+  const files = await listFiles(`'${folders[0].id}' in parents and trashed=false`);
+  return { list: files.find((f) => f.name === LIST_FILE), search: files.find((f) => f.name === SEARCH_FILE) };
+}
+
+function setNotes(notes) {
+  state.notes = notes;
+  state.byId = new Map(notes.map((n) => [n.id, n]));
+}
+
+async function refreshIndex() {
+  if (state.refreshing || !token()) return;
+  state.refreshing = true;
+  try {
+    const found = await indexFiles();
+    if (!found?.list) {
+      if (!state.notes.length) showBanner('雲端還沒有手機索引。請在電腦開啟 WizNote My 同步一次。');
+      return;
+    }
+    state.searchSize = Number(found.search?.size || 0);
+    if (found.list.md5Checksum !== await kvGet('list-md5')) {
+      const data = await gunzipJson(await media(found.list.id));
+      setNotes(data.notes);
+      await kvSet('list', data.notes);
+      await kvSet('list-md5', found.list.md5Checksum);
+      renderHome();
+    }
+    // 已經下載過全文資料才自動更新；沒用過全文搜尋就不佔流量
+    const searchMd5 = await kvGet('search-md5');
+    if (searchMd5 && found.search && searchMd5 !== found.search.md5Checksum) await downloadSearch(found.search);
+    hideBanner();
+    await cacheFavorites();
+  } catch (e) {
+    if (e instanceof AuthError) showLoginBanner();
+    else if (!state.notes.length) showBanner(e.message);
+    else toast(e.message);
+  } finally {
+    state.refreshing = false;
   }
 }
+
+async function downloadSearch(file) {
+  const data = await gunzipJson(await media(file.id));
+  state.searchText = data.text;
+  await kvSet('search', data.text);
+  await kvSet('search-md5', file.md5Checksum);
+}
+
+// 「我的最愛」自動存到手機，沒網路也能看。一篇一篇慢慢來，不影響閱讀。
+async function cacheFavorites() {
+  for (const n of state.notes.filter((x) => x.v)) {
+    const cached = await kvGet(`note:${n.d}`);
+    if (cached?.h === n.h) continue;
+    const saved = await downloadNote(n);
+    await downloadImages(saved);
+  }
+}
+
+// ---- 清單畫面 ----
+
+function showBanner(text, action) {
+  const b = $('banner');
+  b.replaceChildren(el('span', { textContent: text }));
+  if (action) b.append(action);
+  b.hidden = false;
+}
+function hideBanner() {
+  $('banner').hidden = true;
+}
+function loginButton() {
+  return el('button', { type: 'button', textContent: '登入', onclick: login });
+}
+function showLoginBanner() {
+  showBanner('登入已過期，已存在手機上的筆記仍可閱讀。', loginButton());
+}
+
+function toast(msg, ms = 2800) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { t.hidden = true; }, ms);
+}
+
+function fmtDate(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function filtered() {
+  const words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const inFolder = state.tab === 'folders' && state.folder;
+  const items = state.notes.filter((n) => {
+    if (state.tab === 'fav' && !n.v) return false;
+    if (inFolder && n.f !== state.folder && !n.f.startsWith(`${state.folder}/`)) return false;
+    if (!words.length) return true;
+    const hay = `${n.t}\n${n.s}\n${state.searchText?.[n.id] || ''}`.toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
+  const dir = state.order === 'asc' ? 1 : -1;
+  items.sort((a, b) => {
+    if (state.sort === 't') return dir * a.t.localeCompare(b.t, 'zh-Hant', { numeric: true });
+    return dir * (new Date(a[state.sort]).getTime() - new Date(b[state.sort]).getTime());
+  });
+  return items;
+}
+
+function noteRow(n) {
+  const title = el('div', { className: 't' });
+  if (n.v) title.append(el('span', { className: 'fav', textContent: '♥' }));
+  title.append(n.t);
+  const row = el('button', { className: 'row', type: 'button' },
+    title,
+    el('div', { className: 's', textContent: n.s }),
+    el('div', { className: 'm' }, el('span', { className: 'f', textContent: n.f }), el('span', { className: 'd', textContent: fmtDate(state.sort === 'c' ? n.c : n.m) })));
+  row.dataset.id = n.id;
+  row.onclick = () => openNote(n.id);
+  return row;
+}
+
+function appendRows() {
+  const to = Math.min(state.rendered + PAGE, state.shown.length);
+  const frag = document.createDocumentFragment();
+  for (let i = state.rendered; i < to; i++) frag.append(noteRow(state.shown[i]));
+  $('list').append(frag);
+  state.rendered = to;
+}
+
+function renderFolders() {
+  const box = $('folders');
+  const show = state.tab === 'folders' && !state.query.trim();
+  box.hidden = !show;
+  $('folder-back').hidden = !(state.tab === 'folders' && state.folder);
+  if (!show) return;
+  const prefix = state.folder ? `${state.folder}/` : '';
+  const counts = new Map();
+  for (const n of state.notes) {
+    if (!n.f.startsWith(prefix) || n.f === state.folder) continue;
+    const name = n.f.slice(prefix.length).split('/')[0];
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  box.replaceChildren(...[...counts].sort((a, b) => a[0].localeCompare(b[0], 'zh-Hant')).map(([name, count]) => {
+    const row = el('button', { className: 'folder-row', type: 'button' },
+      el('span', { className: 'n', textContent: name }), el('span', { className: 'c', textContent: count }), el('span', { className: 'c', textContent: '›' }));
+    row.dataset.folder = prefix + name;
+    row.onclick = () => openFolder(prefix + name);
+    return row;
+  }));
+}
+
+function renderHome() {
+  for (const t of document.querySelectorAll('.tab')) {
+    t.classList.toggle('on', t.dataset.tab === state.tab);
+    t.setAttribute('aria-selected', String(t.dataset.tab === state.tab));
+  }
+  const title = { all: '全部筆記', fav: '我的最愛', folders: state.folder ? state.folder.split('/').pop() : '分類' }[state.tab];
+  $('home-title').textContent = title;
+  $('sort').value = state.sort;
+  $('order').textContent = state.order === 'asc' ? '↑ 遞增' : '↓ 遞減';
+  renderFolders();
+  // 分類的最上層只列分類，避免一次攤開全部筆記
+  const topLevel = state.tab === 'folders' && !state.folder && !state.query.trim();
+  state.shown = topLevel ? [] : filtered();
+  state.rendered = 0;
+  $('list').replaceChildren();
+  $('count').textContent = topLevel ? '' : `${state.shown.length} 篇`;
+  appendRows();
+  if (!state.shown.length && !topLevel) {
+    let text = '沒有符合的筆記。';
+    if (!state.notes.length) text = '正在等待筆記清單…';
+    else if (state.tab === 'fav' && !state.query.trim()) text = '還沒有我的最愛。在電腦版按愛心後會出現在這裡。';
+    $('list').append(el('div', { className: 'empty', textContent: text }));
+  }
+  renderSearchButton();
+}
+
+function renderSearchButton() {
+  const b = $('search-full');
+  const need = state.query.trim() && !state.searchText && navigator.onLine !== false;
+  b.hidden = !need;
+  if (need) {
+    const mb = state.searchSize ? `，約 ${Math.max(1, Math.round(state.searchSize / 1048576))} MB` : '';
+    b.textContent = `也搜尋內文（第一次要下載${mb}）`;
+  }
+}
+
+async function loadFullSearch() {
+  const b = $('search-full');
+  b.disabled = true;
+  b.textContent = '下載中…';
+  try {
+    const found = await indexFiles();
+    if (!found?.search) throw new Error('雲端還沒有全文資料，請在電腦同步一次。');
+    await downloadSearch(found.search);
+    renderHome();
+  } catch (e) {
+    if (e instanceof AuthError) showLoginBanner();
+    else toast(e.message);
+    renderSearchButton();
+  } finally {
+    b.disabled = false;
+  }
+}
+
+function setTab(tab) {
+  state.tab = tab;
+  state.folder = '';
+  pref('wiznote-tab', tab);
+  history.replaceState({ view: 'home' }, '');
+  renderHome();
+  scrollTo(0, 0);
+}
+
+function openFolder(path) {
+  state.folder = path;
+  history.pushState({ view: 'home', folder: path }, '');
+  renderHome();
+  scrollTo(0, 0);
+}
+
+// ---- 閱讀畫面 ----
+
+// 列出筆記資料夾內所有檔案（含 images、attachments 等子資料夾），路徑相對於筆記
+async function walkNote(dir) {
+  const out = [];
+  const walk = async (id, rel) => {
+    for (const f of await listFiles(`'${id}' in parents and trashed=false`)) {
+      const child = rel ? `${rel}/${f.name}` : f.name;
+      if (f.mimeType === FOLDER_MIME) await walk(f.id, child);
+      else out.push({ rel: child, id: f.id, md5: f.md5Checksum, size: Number(f.size || 0) });
+    }
+  };
+  await walk(dir, '');
+  return out;
+}
+
+async function downloadNote(n) {
+  const files = await walkNote(n.d);
+  const mdName = `${n.id.split('/').pop()}.md`;
+  const md = files.find((f) => f.rel === mdName);
+  if (!md) throw new Error('雲端找不到這篇筆記，可能已被移動。請稍後更新清單。');
+  const text = await (await media(md.id)).text();
+  const saved = { h: n.h, md: text, files };
+  await kvSet(`note:${n.d}`, saved);
+  return saved;
+}
+
+function stripFrontMatter(raw) {
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const m = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(text);
+  return m ? text.slice(m[0].length) : text;
+}
+
+const safeDecode = (s) => {
+  try { return decodeURIComponent(s); } catch { return s; }
+};
+
+// 內容來自網頁剪藏，一律先消毒；禁止表單、樣式和內嵌頁面
+function renderMarkup(html) {
+  const clean = DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'video', 'audio', 'source'],
+    FORBID_ATTR: ['style', 'class', 'id', 'width', 'height', 'srcset'],
+  });
+  const body = $('note-body');
+  body.innerHTML = clean;
+  for (const a of body.querySelectorAll('a')) {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+  }
+}
+
+async function imageBlob(file) {
+  const key = `img:${file.id}:${file.md5}`;
+  const cached = await kvGet(key);
+  if (cached) return cached;
+  const blob = await (await media(file.id)).blob();
+  await kvSet(key, blob);
+  return blob;
+}
+
+// 只把內文真正用到的圖片存到手機
+function referencedImages(saved) {
+  const byRel = new Map(saved.files.map((f) => [f.rel, f]));
+  const out = [];
+  for (const m of saved.md.matchAll(/!\[[^\]]*\]\(<?([^)>\s]+(?:\([^)]*\))?)/g)) {
+    const f = byRel.get(safeDecode(m[1]));
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+async function downloadImages(saved) {
+  for (const f of referencedImages(saved)) await imageBlob(f);
+}
+
+async function resolveImages(saved, noteId) {
+  const byRel = new Map(saved.files.map((f) => [f.rel, f]));
+  const images = [...$('note-body').querySelectorAll('img')];
+  let next = 0;
+  const run = async () => {
+    while (next < images.length) {
+      const img = images[next++];
+      const src = img.getAttribute('src') || '';
+      if (/^https:/i.test(src)) {
+        img.loading = 'lazy';
+        continue;
+      }
+      if (/^(data|blob):/i.test(src)) continue;
+      const file = byRel.get(safeDecode(src));
+      img.removeAttribute('src');
+      try {
+        if (!file) throw new Error('missing');
+        const blob = await imageBlob(file);
+        if (state.current?.id !== noteId) return;
+        const url = URL.createObjectURL(blob);
+        state.objectUrls.push(url);
+        img.src = url;
+      } catch {
+        if (state.current?.id !== noteId) return;
+        img.classList.add('missing');
+        img.alt = img.alt && img.alt !== 'image' ? `［圖片無法顯示：${img.alt}］` : '［圖片無法顯示］';
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, run));
+}
+
+function releaseImages() {
+  for (const u of state.objectUrls) URL.revokeObjectURL(u);
+  state.objectUrls = [];
+}
+
+// 下載成檔案，型別固定成 octet-stream，附件裡的網頁或腳本才不會在這個網站的權限下執行
+async function downloadAttachment(file, name, button) {
+  const label = button.textContent;
+  button.textContent = '下載中…';
+  try {
+    const blob = await (await media(file.id)).blob();
+    const url = URL.createObjectURL(new Blob([blob], { type: 'application/octet-stream' }));
+    const a = el('a', { href: url, download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    if (e instanceof AuthError) showNoteLogin();
+    else toast(e.message);
+  } finally {
+    button.textContent = label;
+  }
+}
+
+function showNoteLogin(text = '登入已過期，登入後才能下載這篇的內容。') {
+  const b = $('note-banner');
+  b.replaceChildren(el('span', { textContent: text }), loginButton());
+  b.hidden = false;
+}
+
+function renderActions(n, saved) {
+  const box = $('note-actions');
+  box.replaceChildren();
+  if (n.u && /^https?:\/\//i.test(n.u)) box.append(el('a', { href: n.u, target: '_blank', rel: 'noopener noreferrer', textContent: '原始網址' }));
+  if (!saved) return;
+  const stem = n.id.split('/').pop();
+  const html = saved.files.find((f) => f.rel === `${stem}.html`);
+  if (html) {
+    const b = el('button', { type: 'button', textContent: '原始 HTML' });
+    b.onclick = async () => {
+      try {
+        const text = await (await media(html.id)).text();
+        if (state.current?.id !== n.id) return;
+        releaseImages();
+        renderMarkup(text);
+        await resolveImages(saved, n.id);
+        b.remove();
+      } catch (e) {
+        if (e instanceof AuthError) showNoteLogin();
+        else toast(e.message);
+      }
+    };
+    box.append(b);
+  }
+  for (const f of saved.files.filter((x) => x.rel.startsWith('attachments/'))) {
+    const name = f.rel.split('/').pop();
+    const b = el('button', { type: 'button', textContent: `📎 ${name}` });
+    b.onclick = () => downloadAttachment(f, name, b);
+    box.append(b);
+  }
+}
+
+async function showNote(n) {
+  releaseImages();
+  state.current = n;
+  $('home-view').hidden = true;
+  $('note-view').hidden = false;
+  $('note-title').textContent = n.t;
+  $('note-fav').hidden = !n.v;
+  $('note-meta').textContent = [n.f, `建立 ${fmtDate(n.c)}`, `修改 ${fmtDate(n.m)}`].filter(Boolean).join('　');
+  $('note-banner').hidden = true;
+  $('note-body').replaceChildren(el('p', { className: 'muted', textContent: '載入中…' }));
+  renderActions(n, null);
+  scrollTo(0, 0);
+
+  let saved = await kvGet(`note:${n.d}`);
+  let stale = false;
+  if (saved?.h !== n.h) {
+    try {
+      saved = await downloadNote(n);
+    } catch (e) {
+      if (state.current?.id !== n.id) return;
+      if (!saved) {
+        $('note-body').replaceChildren(el('p', { className: 'muted', textContent: e instanceof AuthError ? '這篇還沒存到手機上。' : e.message }));
+        if (e instanceof AuthError) showNoteLogin();
+        return;
+      }
+      stale = true;
+      if (e instanceof AuthError) showNoteLogin('這是手機上的舊版本。登入後可以更新。');
+    }
+  }
+  if (state.current?.id !== n.id) return;
+  if (stale && $('note-banner').hidden) {
+    const b = $('note-banner');
+    b.replaceChildren(el('span', { textContent: '目前無法更新，顯示的是手機上的舊版本。' }));
+    b.hidden = false;
+  }
+  renderMarkup(marked.parse(stripFrontMatter(saved.md), { gfm: true }));
+  renderActions(n, saved);
+  await resolveImages(saved, n.id);
+}
+
+function openNote(id) {
+  const n = state.byId.get(id);
+  if (!n) return;
+  state.listScroll = scrollY;
+  history.pushState({ view: 'note', id, folder: state.folder }, '');
+  showNote(n);
+}
+
+function closeNoteView() {
+  releaseImages();
+  state.current = null;
+  $('note-body').replaceChildren();
+  $('note-view').hidden = true;
+  $('home-view').hidden = false;
+}
+
+// 用瀏覽器的上一頁處理返回，iPhone 邊緣滑動也能回去
+window.addEventListener('popstate', (e) => {
+  const s = e.state || {};
+  if (s.view === 'note' && state.byId.has(s.id)) {
+    showNote(state.byId.get(s.id));
+    return;
+  }
+  const wasNote = !$('note-view').hidden;
+  closeNoteView();
+  if (!wasNote || (s.folder || '') !== state.folder) {
+    state.folder = s.folder || '';
+    renderHome();
+  }
+  scrollTo(0, wasNote ? state.listScroll || 0 : 0);
+});
+
+// ---- 設定 ----
+
+async function openSheet() {
+  $('sheet-account').textContent = pref('wiznote-account') ? `帳號：${pref('wiznote-account')}` : '';
+  $('sheet-storage').textContent = '';
+  $('sheet').hidden = false;
+  try {
+    const { usage } = await navigator.storage.estimate();
+    $('sheet-storage').textContent = `手機上已存約 ${Math.round(usage / 1048576)} MB`;
+  } catch { /* 有些瀏覽器不提供 */ }
+}
+
+async function rememberAccount() {
+  if (pref('wiznote-account')) return;
+  try {
+    const data = await (await drive('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)')).json();
+    if (data.user?.emailAddress) pref('wiznote-account', data.user.emailAddress);
+  } catch { /* 只影響下次是否要選帳號 */ }
+}
+
+function bindEvents() {
+  $('login').onclick = login;
+  for (const t of document.querySelectorAll('.tab')) t.onclick = () => setTab(t.dataset.tab);
+  $('note-back').onclick = () => history.back();
+  $('folder-back').onclick = () => history.back();
+  $('settings').onclick = openSheet;
+  $('sheet-close').onclick = () => { $('sheet').hidden = true; };
+  $('sheet').onclick = (e) => { if (e.target === $('sheet')) $('sheet').hidden = true; };
+  $('logout').onclick = logout;
+  $('refresh').onclick = () => {
+    $('sheet').hidden = true;
+    if (!token()) login();
+    else refreshIndex().then(() => toast('筆記清單已是最新'));
+  };
+  $('clear-cache').onclick = async () => {
+    await kvClear();
+    state.searchText = null;
+    await kvSet('list', state.notes);
+    $('sheet').hidden = true;
+    toast('已清除離線內容');
+    refreshIndex();
+  };
+  let searchTimer;
+  $('search').oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      state.query = $('search').value;
+      if (state.query.trim() && !state.searchText) {
+        const text = await kvGet('search');
+        if (text) state.searchText = text;
+      }
+      renderHome();
+    }, 150);
+  };
+  $('search-full').onclick = loadFullSearch;
+  $('sort').onchange = () => {
+    state.sort = $('sort').value;
+    pref('wiznote-sort', state.sort);
+    renderHome();
+  };
+  $('order').onclick = () => {
+    state.order = state.order === 'asc' ? 'desc' : 'asc';
+    pref('wiznote-order', state.order);
+    renderHome();
+  };
+  new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting && state.rendered < state.shown.length) appendRows();
+  }, { rootMargin: '400px' }).observe($('sentinel'));
+  // 回到 App 時檢查更新
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !state.current) refreshIndex();
+  });
+}
+
+async function start() {
+  bindEvents();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.storage?.persist?.().catch(() => {});
+  const oauthError = takeOauthResult();
+  state.tab = pref('wiznote-tab') || 'all';
+  state.sort = pref('wiznote-sort') || 'm';
+  state.order = pref('wiznote-order') || 'desc';
+  const cached = await kvGet('list');
+  if (cached) setNotes(cached);
+
+  if (!cached && !token()) {
+    $('login-view').hidden = false;
+    if (oauthError) toast(oauthError, 6000);
+    return;
+  }
+  $('home-view').hidden = false;
+  history.replaceState({ view: 'home' }, '');
+  renderHome();
+  if (oauthError) toast(oauthError, 6000);
+  if (!token()) showLoginBanner();
+  else rememberAccount();
+
+  const returnId = pref('wiznote-return-note');
+  pref('wiznote-return-note', null);
+  if (returnId && state.byId.has(returnId)) openNote(returnId);
+  refreshIndex();
+}
+
+start();
