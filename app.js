@@ -92,6 +92,44 @@ const kvGet = (k) => store('readonly', (s) => s.get(k)).catch(() => undefined);
 const kvSet = (k, v) => store('readwrite', (s) => s.put(v, k)).catch(() => undefined);
 const kvClear = () => store('readwrite', (s) => s.clear()).catch(() => undefined);
 
+// ---- 閱讀樣式（只存在這支手機上）----
+
+const STYLE_KEY = 'wiznote-style';
+const STYLE_DEFAULT = { theme: 'auto', size: '17', boldc: 'on', bubble: 'on' };
+
+function readingStyle() {
+  try {
+    return { ...STYLE_DEFAULT, ...JSON.parse(pref(STYLE_KEY) || '{}') };
+  } catch {
+    return { ...STYLE_DEFAULT };
+  }
+}
+
+function applyStyle(s = readingStyle()) {
+  const root = document.documentElement;
+  if (s.theme === 'auto') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', s.theme);
+  root.style.setProperty('--read-size', `${s.size}px`);
+  document.body.classList.toggle('boldc', s.boldc === 'on');
+  document.body.classList.toggle('bubble', s.bubble === 'on');
+  for (const seg of document.querySelectorAll('#style-box .seg')) {
+    for (const b of seg.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === s[seg.dataset.key]);
+  }
+}
+
+function bindStyle() {
+  for (const seg of document.querySelectorAll('#style-box .seg')) {
+    seg.onclick = (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      const s = { ...readingStyle(), [seg.dataset.key]: b.dataset.v };
+      pref(STYLE_KEY, JSON.stringify(s));
+      applyStyle(s);
+      updateJump();
+    };
+  }
+}
+
 // ---- 登入 ----
 
 class AuthError extends Error {}
@@ -576,6 +614,7 @@ function renderMarkup(html) {
   });
   const body = $('note-body');
   body.innerHTML = clean;
+  groupTurns(body);
   for (const a of body.querySelectorAll('a')) {
     a.target = '_blank';
     a.rel = 'noopener noreferrer';
@@ -761,20 +800,42 @@ async function showNote(n) {
 
 // ---- 長文章的閱讀輔助 ----
 
-// AI 對話每一題的開頭是「**🧑 我**　時間」，排版後是段落開頭的粗體
-function findQuestions() {
-  const out = [];
-  for (const b of $('note-body').querySelectorAll('p > strong:first-child')) {
-    if (!b.textContent.startsWith('🧑 我')) continue;
-    const p = b.parentElement;
-    p.classList.add('turn-q');
-    const when = p.textContent.slice(b.textContent.length).trim();
-    let next = p.nextElementSibling;
-    while (next && !next.textContent.trim()) next = next.nextElementSibling;
-    const text = (next?.textContent || '').trim().split('\n')[0];
-    out.push({ el: p, when, text: text.length > 60 ? `${text.slice(0, 60)}…` : text || '（空白）' });
+// AI 對話：每一段從「**🧑 我**」或「**🤖 …**」開頭，到下一段之前，包成一個區塊，才能把問題畫成對話框
+function groupTurns(root) {
+  const isHead = (n) => n?.tagName === 'P' && n.firstChild && n.firstChild === n.firstElementChild
+    && n.firstChild.tagName === 'STRONG' && /^(🧑 我|🤖 )/.test(n.firstChild.textContent);
+  let box = null;
+  for (const node of [...root.children]) {
+    if (isHead(node)) {
+      box = document.createElement('div');
+      box.className = node.firstChild.textContent.startsWith('🧑') ? 'turn turn-user' : 'turn turn-ai';
+      node.classList.add('who');
+      // 時間另外包起來，顯示得淡一點
+      const when = document.createElement('span');
+      when.className = 'when';
+      when.append(...[...node.childNodes].slice(1));
+      node.append(when);
+      node.before(box);
+      box.append(node);
+    } else if (node.tagName === 'HR' && isHead(node.nextElementSibling)) {
+      // 段與段之間的分隔線改由區塊本身表現
+      node.remove();
+    } else if (box) {
+      box.append(node);
+    }
   }
-  return out;
+  return [...root.querySelectorAll('.turn-user')];
+}
+
+// 問題目錄：每個「我」的區塊
+function findQuestions() {
+  return [...$('note-body').querySelectorAll('.turn-user')].map((box) => {
+    box.classList.add('turn-q');
+    const when = box.querySelector('.who .when')?.textContent.trim() || '';
+    const first = [...box.children].find((c) => !c.classList.contains('who') && c.textContent.trim());
+    const text = (first?.textContent || '').trim().split('\n')[0];
+    return { el: box, when, text: text.length > 60 ? `${text.slice(0, 60)}…` : text || '（空白）' };
+  });
 }
 
 function renderNav(questions) {
@@ -1070,6 +1131,8 @@ function bindEvents() {
 }
 
 async function start() {
+  applyStyle();
+  bindStyle();
   bindEvents();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   navigator.storage?.persist?.().catch(() => {});
