@@ -716,6 +716,8 @@ async function showNote(n) {
   $('note-banner').hidden = true;
   $('note-body').replaceChildren(el('p', { className: 'muted', textContent: '載入中…' }));
   renderActions(n, null);
+  state.posReady = '';
+  renderNav([]);
   scrollTo(0, 0);
 
   let saved = await kvGet(`note:${n.d}`);
@@ -749,7 +751,98 @@ async function showNote(n) {
   $('note-edit').disabled = false;
   renderMarkup(marked.parse(noteBody(n, saved), { gfm: true }));
   renderActions(n, saved);
+  renderNav(findQuestions());
+  const restored = restorePosition(n.id);
   await resolveImages(saved, n.id);
+  // 圖片載入後高度會變；使用者還沒動過就再對一次位置
+  if (restored && state.current?.id === n.id && scrollY === restored.at) restorePosition(n.id, false);
+  if (state.current?.id === n.id) updateJump();
+}
+
+// ---- 長文章的閱讀輔助 ----
+
+// AI 對話每一題的開頭是「**🧑 我**　時間」，排版後是段落開頭的粗體
+function findQuestions() {
+  const out = [];
+  for (const b of $('note-body').querySelectorAll('p > strong:first-child')) {
+    if (!b.textContent.startsWith('🧑 我')) continue;
+    const p = b.parentElement;
+    p.classList.add('turn-q');
+    const when = p.textContent.slice(b.textContent.length).trim();
+    let next = p.nextElementSibling;
+    while (next && !next.textContent.trim()) next = next.nextElementSibling;
+    const text = (next?.textContent || '').trim().split('\n')[0];
+    out.push({ el: p, when, text: text.length > 60 ? `${text.slice(0, 60)}…` : text || '（空白）' });
+  }
+  return out;
+}
+
+function renderNav(questions) {
+  state.questions = questions;
+  $('note-toc').hidden = questions.length < 2;
+  updateJump();
+}
+
+// 文章超過約兩個畫面才顯示到頂端／到底部
+function updateJump() {
+  const long = !$('note-view').hidden && !state.editing && document.documentElement.scrollHeight > innerHeight * 2.2;
+  $('jump').hidden = !long;
+}
+
+function openToc() {
+  const list = $('toc-list');
+  const cur = currentQuestion();
+  list.replaceChildren(...state.questions.map((q, i) => {
+    const b = el('button', { type: 'button', className: `toc-item${i === cur ? ' on' : ''}` },
+      el('span', { className: 'toc-n', textContent: String(i + 1) }),
+      el('span', { className: 'toc-t', textContent: q.text }),
+      el('span', { className: 'toc-w', textContent: q.when }));
+    b.onclick = () => {
+      $('toc').hidden = true;
+      q.el.scrollIntoView({ block: 'start' });
+    };
+    return b;
+  }));
+  $('toc-count').textContent = `共 ${state.questions.length} 題`;
+  $('toc').hidden = false;
+  list.children[cur]?.scrollIntoView({ block: 'center' });
+}
+
+// 畫面上方最接近的那一題
+function currentQuestion() {
+  let cur = 0;
+  state.questions.forEach((q, i) => { if (q.el.getBoundingClientRect().top < 120) cur = i; });
+  return cur;
+}
+
+// ---- 記住看到哪裡 ----
+
+const POS_KEY = 'wiznote-positions';
+const POS_KEEP = 300;
+
+function positions() {
+  try { return JSON.parse(pref(POS_KEY) || '{}'); } catch { return {}; }
+}
+
+function savePosition() {
+  const n = state.current;
+  if (!n || state.posReady !== n.id || state.editing) return;
+  const all = positions();
+  if (scrollY < innerHeight) delete all[n.id];
+  else all[n.id] = { y: Math.round(scrollY), t: Date.now() };
+  // 只留最近看過的幾百篇
+  const keys = Object.keys(all);
+  if (keys.length > POS_KEEP) keys.sort((a, b) => all[a].t - all[b].t).slice(0, keys.length - POS_KEEP).forEach((k) => delete all[k]);
+  pref(POS_KEY, JSON.stringify(all));
+}
+
+function restorePosition(id, announce = true) {
+  state.posReady = id;
+  const p = positions()[id];
+  if (!p || p.y >= document.documentElement.scrollHeight) return null;
+  scrollTo(0, p.y);
+  if (announce) toast('從上次看到的地方繼續', 2000);
+  return { at: scrollY };
 }
 
 function renderNoteFav(n) {
@@ -794,6 +887,8 @@ function setEditMode(on) {
   // 自動產生的筆記（AI 對話）是唯讀的
   if (state.current?.r) $('note-edit').hidden = true;
   for (const id of ['edit-cancel', 'edit-save', 'note-editor', 'edit-hint']) $(id).hidden = !on;
+  $('note-toc').hidden = on || (state.questions || []).length < 2;
+  updateJump();
 }
 
 async function startEdit() {
@@ -842,8 +937,12 @@ function openNote(id) {
 }
 
 function closeNoteView() {
+  savePosition();
   releaseImages();
   state.current = null;
+  state.posReady = '';
+  $('jump').hidden = true;
+  $('toc').hidden = true;
   $('note-body').replaceChildren();
   $('note-view').hidden = true;
   $('home-view').hidden = false;
@@ -901,6 +1000,19 @@ function bindEvents() {
   $('note-fav').onclick = toggleNoteFavorite;
   $('note-trash').onclick = trashCurrentNote;
   $('note-edit').onclick = startEdit;
+  $('note-toc').onclick = openToc;
+  $('toc-close').onclick = () => { $('toc').hidden = true; };
+  $('toc').onclick = (e) => { if (e.target === $('toc')) $('toc').hidden = true; };
+  $('jump-top').onclick = () => scrollTo({ top: 0 });
+  $('jump-bottom').onclick = () => scrollTo({ top: document.documentElement.scrollHeight });
+  let posTimer;
+  addEventListener('scroll', () => {
+    clearTimeout(posTimer);
+    posTimer = setTimeout(savePosition, 400);
+  }, { passive: true });
+  addEventListener('resize', updateJump);
+  // App 切到背景時也記一下
+  document.addEventListener('visibilitychange', () => { if (document.hidden) savePosition(); });
   $('edit-cancel').onclick = cancelEdit;
   $('edit-save').onclick = saveEdit;
   $('note-editor').addEventListener('input', fitEditor);

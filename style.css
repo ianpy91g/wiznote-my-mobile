@@ -59,6 +59,22 @@ button.wide { display: block; width: calc(100% - 32px); margin: 8px 16px; }
 .fav-toggle.on { color: var(--fav); }
 #note-trash { font-size: 20px; }
 #note-edit { font-size: 22px; }
+#note-toc { font-size: 22px; }
+/* 跳到某一題時不要被固定的標題列蓋住 */
+.content .turn-q { scroll-margin-top: calc(72px + env(safe-area-inset-top)); }
+
+#jump { position: fixed; right: 12px; bottom: calc(76px + env(safe-area-inset-bottom)); z-index: 15; display: flex; flex-direction: column; gap: 8px; }
+#jump button { width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 22px; border: 1px solid var(--line); background: var(--bar); color: var(--text); font-size: 20px; opacity: .88; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+
+.toc-box { max-height: 80vh; max-height: 80dvh; display: flex; flex-direction: column; }
+.toc-head { display: flex; align-items: baseline; gap: 10px; padding: 0 16px 6px; }
+.toc-head h2 { padding: 0; }
+#toc-list { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--line); }
+.toc-item { display: grid; grid-template-columns: 28px 1fr; grid-template-rows: auto auto; column-gap: 6px; width: 100%; min-height: 52px; padding: 8px 16px 8px 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: none; text-align: left; }
+.toc-item.on { background: var(--accent-soft); }
+.toc-n { grid-row: 1 / 3; color: var(--muted); font-size: 13px; text-align: right; padding-top: 2px; }
+.toc-t { font-size: 15px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.toc-w { color: var(--muted); font-size: 12px; }
 #note-edit:disabled { opacity: .35; }
 .text-btn { flex: none; min-height: 38px; padding: 0 14px; font-size: 15px; }
 #edit-hint { margin: 0 0 8px; }

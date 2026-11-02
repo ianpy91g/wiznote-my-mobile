@@ -56,6 +56,7 @@
     <div class="bar-row">
       <button id="note-back" class="icon" type="button" aria-label="返回">‹</button>
       <h1 id="note-title"></h1>
+      <button id="note-toc" class="icon" type="button" aria-label="問題目錄" hidden>☰</button>
       <button id="note-fav" class="icon fav-toggle" type="button" aria-label="加入我的最愛">♡</button>
       <button id="note-edit" class="icon" type="button" aria-label="修改內文" disabled>✎</button>
       <button id="note-trash" class="icon" type="button" aria-label="刪除">🗑</button>
@@ -83,6 +84,19 @@
     <button id="clear-cache" class="wide" type="button">清除手機上的離線內容</button>
     <button id="logout" class="wide" type="button">登出</button>
     <button id="sheet-close" class="wide primary" type="button">關閉</button>
+  </div>
+</div>
+
+<div id="jump" hidden>
+  <button id="jump-top" type="button" aria-label="到最上面">↑</button>
+  <button id="jump-bottom" type="button" aria-label="到最下面">↓</button>
+</div>
+
+<div id="toc" class="sheet" hidden>
+  <div class="sheet-box toc-box">
+    <div class="toc-head"><h2>問題目錄</h2><span id="toc-count" class="muted"></span></div>
+    <div id="toc-list"></div>
+    <button id="toc-close" class="wide primary" type="button">關閉</button>
   </div>
 </div>
 
