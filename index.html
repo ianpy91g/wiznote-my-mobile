@@ -17,7 +17,7 @@
 <div id="login-view" class="center" hidden>
   <img src="icons/icon-180.png" alt="" width="84" height="84">
   <h1>WizNote My</h1>
-  <p class="muted">閱讀電腦版同步到 Google 雲端硬碟的筆記，也可以加入最愛或刪除。</p>
+  <p class="muted">閱讀電腦版同步到 Google 雲端硬碟的筆記，也可以加入最愛、刪除和修改文字。</p>
   <button id="login" class="primary" type="button">登入 Google</button>
 </div>
 
@@ -57,7 +57,10 @@
       <button id="note-back" class="icon" type="button" aria-label="返回">‹</button>
       <h1 id="note-title"></h1>
       <button id="note-fav" class="icon fav-toggle" type="button" aria-label="加入我的最愛">♡</button>
+      <button id="note-edit" class="icon" type="button" aria-label="修改內文" disabled>✎</button>
       <button id="note-trash" class="icon" type="button" aria-label="刪除">🗑</button>
+      <button id="edit-cancel" class="text-btn" type="button" hidden>取消</button>
+      <button id="edit-save" class="text-btn primary" type="button" hidden>儲存</button>
     </div>
   </header>
   <div id="note-banner" class="banner" hidden></div>
@@ -65,6 +68,8 @@
     <p id="note-meta" class="muted"></p>
     <div id="note-actions" class="actions"></div>
     <div id="note-body" class="content"></div>
+    <p id="edit-hint" class="muted" hidden>直接修改文字即可。<code>![image](…)</code> 這類行是圖片，刪掉圖片就不見了。</p>
+    <textarea id="note-editor" aria-label="內文" spellcheck="false" autocapitalize="off" hidden></textarea>
   </article>
 </div>
 

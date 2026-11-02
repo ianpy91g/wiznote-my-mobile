@@ -58,6 +58,11 @@ button.wide { display: block; width: calc(100% - 32px); margin: 8px 16px; }
 .fav-toggle { color: var(--muted); }
 .fav-toggle.on { color: var(--fav); }
 #note-trash { font-size: 20px; }
+#note-edit { font-size: 22px; }
+#note-edit:disabled { opacity: .35; }
+.text-btn { flex: none; min-height: 38px; padding: 0 14px; font-size: 15px; }
+#edit-hint { margin: 0 0 8px; }
+#note-editor { display: block; width: 100%; min-height: 60vh; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif; resize: none; overflow: hidden; }
 #sentinel { height: 1px; }
 .empty { padding: 40px 24px; color: var(--muted); text-align: center; }
 

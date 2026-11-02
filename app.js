@@ -2,8 +2,8 @@
 /* global marked, DOMPurify */
 // WizNote My 手機版：閱讀為主。筆記本身只下載不修改。
 // 筆記清單來自電腦版上傳的索引；內文和圖片點開時才下載，看過的存在手機上。
-// 加入最愛和刪除不直接改筆記，而是在手機索引資料夾留一個請求檔，由電腦版用原本的功能執行，
-// 刪除才會進電腦版的回收桶。電腦處理前先把結果疊在手機的清單上。
+// 加入最愛、刪除和修改內文不直接改筆記，而是在手機索引資料夾留一個請求檔，由電腦版用原本的功能執行，
+// 刪除才會進電腦版的回收桶，修改也會留歷史版本、遇到衝突另存衝突檔。電腦處理前先把結果疊在手機上。
 
 const CLIENT_ID = '77837898411-r25e1qo9igtg0ib314ccr5ud77l7uv70.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -32,6 +32,8 @@ const state = {
   pending: [],
   mobileFolder: '',
   sending: false,
+  currentSaved: null,
+  editing: null,
   byId: new Map(),
   searchText: null,
   searchSize: 0,
@@ -198,11 +200,18 @@ function setNotes(notes) {
   state.raw = notes;
   const fav = new Map();
   const gone = new Set();
+  const edited = new Map();
   for (const p of state.pending) {
     if (p.action === 'trash') gone.add(p.id);
+    else if (p.action === 'edit') edited.set(p.id, p.body);
     else fav.set(p.id, p.on);
   }
-  state.notes = notes.filter((n) => !gone.has(n.id)).map((n) => (fav.has(n.id) && !!n.v !== fav.get(n.id) ? { ...n, v: fav.get(n.id) ? 1 : 0 } : n));
+  state.notes = notes.filter((n) => !gone.has(n.id)).map((n) => {
+    let out = n;
+    if (fav.has(n.id) && !!n.v !== fav.get(n.id)) out = { ...out, v: fav.get(n.id) ? 1 : 0 };
+    if (edited.has(n.id)) out = { ...out, s: snippet(edited.get(n.id)) };
+    return out;
+  });
   state.byId = new Map(state.notes.map((n) => [n.id, n]));
 }
 
@@ -210,12 +219,17 @@ function setNotes(notes) {
 
 const savePending = () => kvSet('pending', state.pending);
 
-async function queueRequest(action, id, on) {
-  // 還沒送出的同一篇最愛切換直接換掉，不必送兩次
-  if (action === 'favorite') state.pending = state.pending.filter((p) => p.sent || p.action !== 'favorite' || p.id !== id);
+async function queueRequest(action, id, extra = {}) {
+  // 還沒送出的同一篇最愛切換或修改直接換掉，不必送兩次。
+  // 換掉的修改電腦從沒看過，所以沿用它的起點，電腦才比對得到。
+  const old = action !== 'trash' && state.pending.find((p) => !p.sent && p.action === action && p.id === id);
+  if (old) {
+    state.pending = state.pending.filter((p) => p !== old);
+    if (action === 'edit') extra = { ...extra, base: old.base };
+  }
   state.pending.push({
     name: `${REQUEST_PREFIX}${Date.now()}-${crypto.randomUUID().slice(0, 8)}.json`,
-    action, id, ...(action === 'favorite' ? { on } : {}), at: new Date().toISOString(), sent: 0,
+    action, id, ...extra, at: new Date().toISOString(), sent: 0,
   });
   await savePending();
   setNotes(state.raw);
@@ -258,6 +272,22 @@ function prunePending(found) {
   state.pending = keep;
   savePending();
   return true;
+}
+
+// 手機上最新一份還沒被電腦處理的修改
+function pendingBody(id) {
+  for (let i = state.pending.length - 1; i >= 0; i--) {
+    const p = state.pending[i];
+    if (p.action === 'edit' && p.id === id) return p.body;
+  }
+  return undefined;
+}
+
+const snippet = (body) => body.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/[#>*_`|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 90);
+
+async function sha256(text) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function pendingNote() {
@@ -516,11 +546,14 @@ async function downloadNote(n) {
   return saved;
 }
 
-function stripFrontMatter(raw) {
+// 和電腦版的切法完全相同，兩邊比對內文才會一致
+function splitBody(raw) {
   const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-  const m = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(text);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)(?:\r?\n)?/.exec(text);
   return m ? text.slice(m[0].length) : text;
 }
+
+const noteBody = (n, saved) => pendingBody(n.id) ?? splitBody(saved.md);
 
 const safeDecode = (s) => {
   try { return decodeURIComponent(s); } catch { return s; }
@@ -661,8 +694,11 @@ function renderActions(n, saved) {
 }
 
 async function showNote(n) {
+  exitEdit();
   releaseImages();
   state.current = n;
+  state.currentSaved = null;
+  $('note-edit').disabled = true;
   $('home-view').hidden = true;
   $('note-view').hidden = false;
   $('note-title').textContent = n.t;
@@ -695,7 +731,14 @@ async function showNote(n) {
     b.replaceChildren(el('span', { textContent: '目前無法更新，顯示的是手機上的舊版本。' }));
     b.hidden = false;
   }
-  renderMarkup(marked.parse(stripFrontMatter(saved.md), { gfm: true }));
+  if (n.k && $('note-banner').hidden) {
+    const b = $('note-banner');
+    b.replaceChildren(el('span', { textContent: '這篇有衝突檔：內文在別處也被改過，請在電腦版比對。' }));
+    b.hidden = false;
+  }
+  state.currentSaved = saved;
+  $('note-edit').disabled = false;
+  renderMarkup(marked.parse(noteBody(n, saved), { gfm: true }));
   renderActions(n, saved);
   await resolveImages(saved, n.id);
 }
@@ -712,7 +755,7 @@ async function toggleNoteFavorite() {
   const n = state.current;
   if (!n) return;
   const on = !n.v;
-  await queueRequest('favorite', n.id, on);
+  await queueRequest('favorite', n.id, { on });
   state.current = state.byId.get(n.id) || n;
   renderNoteFav(state.current);
   toast(on ? '已加入我的最愛，電腦同步後也會更新' : '已從我的最愛移除，電腦同步後也會更新');
@@ -725,6 +768,58 @@ async function trashCurrentNote() {
   await queueRequest('trash', n.id);
   history.back();
   toast('已刪除，電腦同步時會移到回收桶');
+}
+
+// ---- 修改內文 ----
+
+const editDirty = () => !!state.editing && $('note-editor').value !== state.editing.initial;
+
+function fitEditor() {
+  const ta = $('note-editor');
+  ta.style.height = 'auto';
+  ta.style.height = `${ta.scrollHeight + 4}px`;
+}
+
+function setEditMode(on) {
+  for (const id of ['note-back', 'note-fav', 'note-edit', 'note-trash', 'note-body', 'note-actions']) $(id).hidden = on;
+  for (const id of ['edit-cancel', 'edit-save', 'note-editor', 'edit-hint']) $(id).hidden = !on;
+}
+
+async function startEdit() {
+  const n = state.current;
+  const saved = state.currentSaved;
+  if (!n || !saved) return;
+  const text = noteBody(n, saved);
+  const ta = $('note-editor');
+  ta.value = text;
+  state.editing = { id: n.id, initial: ta.value, base: await sha256(text) };
+  setEditMode(true);
+  fitEditor();
+  scrollTo(0, 0);
+}
+
+function exitEdit() {
+  if (!state.editing) return;
+  state.editing = null;
+  $('note-editor').value = '';
+  setEditMode(false);
+}
+
+function cancelEdit() {
+  if (editDirty() && !confirm('放棄這次的修改？')) return;
+  exitEdit();
+}
+
+async function saveEdit() {
+  const e = state.editing;
+  if (!e) return;
+  const changed = editDirty();
+  // 電腦存檔時也會拿掉開頭的空行，兩邊才算同一份內文
+  if (changed) await queueRequest('edit', e.id, { body: $('note-editor').value.replace(/^\s*\n/, ''), base: e.base });
+  exitEdit();
+  const n = state.byId.get(e.id);
+  if (n && state.current?.id === e.id) await showNote(n);
+  if (changed) toast('已儲存，電腦同步後也會更新');
 }
 
 function openNote(id) {
@@ -745,6 +840,14 @@ function closeNoteView() {
 
 // 用瀏覽器的上一頁處理返回，iPhone 邊緣滑動也能回去
 window.addEventListener('popstate', (e) => {
+  // 編輯中按返回或邊緣滑動：還有沒存的修改就先問
+  if (state.editing) {
+    if (editDirty() && !confirm('放棄這次的修改？')) {
+      history.pushState({ view: 'note', id: state.editing.id, folder: state.folder }, '');
+      return;
+    }
+    exitEdit();
+  }
   const s = e.state || {};
   if (s.view === 'note' && state.byId.has(s.id)) {
     showNote(state.byId.get(s.id));
@@ -786,6 +889,11 @@ function bindEvents() {
   $('note-back').onclick = () => history.back();
   $('note-fav').onclick = toggleNoteFavorite;
   $('note-trash').onclick = trashCurrentNote;
+  $('note-edit').onclick = startEdit;
+  $('edit-cancel').onclick = cancelEdit;
+  $('edit-save').onclick = saveEdit;
+  $('note-editor').addEventListener('input', fitEditor);
+  window.addEventListener('beforeunload', (e) => { if (editDirty()) e.preventDefault(); });
   $('folder-back').onclick = () => history.back();
   $('settings').onclick = openSheet;
   $('sheet-close').onclick = () => { $('sheet').hidden = true; };
