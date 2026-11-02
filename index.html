@@ -17,7 +17,7 @@
 <div id="login-view" class="center" hidden>
   <img src="icons/icon-180.png" alt="" width="84" height="84">
   <h1>WizNote My</h1>
-  <p class="muted">閱讀電腦版同步到 Google 雲端硬碟的筆記。手機版只看不改。</p>
+  <p class="muted">閱讀電腦版同步到 Google 雲端硬碟的筆記，也可以加入最愛或刪除。</p>
   <button id="login" class="primary" type="button">登入 Google</button>
 </div>
 
@@ -55,8 +55,9 @@
   <header class="bar">
     <div class="bar-row">
       <button id="note-back" class="icon" type="button" aria-label="返回">‹</button>
-      <span id="note-fav" class="fav" hidden>♥</span>
       <h1 id="note-title"></h1>
+      <button id="note-fav" class="icon fav-toggle" type="button" aria-label="加入我的最愛">♡</button>
+      <button id="note-trash" class="icon" type="button" aria-label="刪除">🗑</button>
     </div>
   </header>
   <div id="note-banner" class="banner" hidden></div>
@@ -72,6 +73,7 @@
     <h2>設定</h2>
     <p id="sheet-account" class="muted"></p>
     <p id="sheet-storage" class="muted"></p>
+    <p id="sheet-pending" class="muted"></p>
     <button id="refresh" class="wide" type="button">立即更新筆記清單</button>
     <button id="clear-cache" class="wide" type="button">清除手機上的離線內容</button>
     <button id="logout" class="wide" type="button">登出</button>

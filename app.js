@@ -1,7 +1,9 @@
 'use strict';
 /* global marked, DOMPurify */
-// WizNote My 手機版：唯讀。只有下載，程式裡沒有任何寫入雲端的呼叫。
+// WizNote My 手機版：閱讀為主。筆記本身只下載不修改。
 // 筆記清單來自電腦版上傳的索引；內文和圖片點開時才下載，看過的存在手機上。
+// 加入最愛和刪除不直接改筆記，而是在手機索引資料夾留一個請求檔，由電腦版用原本的功能執行，
+// 刪除才會進電腦版的回收桶。電腦處理前先把結果疊在手機的清單上。
 
 const CLIENT_ID = '77837898411-r25e1qo9igtg0ib314ccr5ud77l7uv70.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -9,6 +11,10 @@ const API = 'https://www.googleapis.com/drive/v3/files';
 const MOBILE_FOLDER = 'WizNote My Mobile';
 const LIST_FILE = 'index.json.gz';
 const SEARCH_FILE = 'search.json.gz';
+const REQUEST_PREFIX = 'request-';
+const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
+// 剛送出的請求可能還沒出現在搜尋結果裡，這段時間內不當成電腦已處理
+const REQUEST_GRACE = 2 * 60 * 1000;
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const PAGE = 100;
 
@@ -21,7 +27,11 @@ const el = (tag, props = {}, ...children) => {
 };
 
 const state = {
+  raw: [],
   notes: [],
+  pending: [],
+  mobileFolder: '',
+  sending: false,
   byId: new Map(),
   searchText: null,
   searchSize: 0,
@@ -121,20 +131,22 @@ function takeOauthResult() {
 
 // 登出時一併清掉手機上的筆記，否則下一個拿到手機的人還是看得到
 async function logout() {
+  const unsent = state.pending.filter((p) => !p.sent).length;
+  if (unsent && !confirm(`還有 ${unsent} 項變更沒送到雲端，登出後會放棄。要登出嗎？`)) return;
   pref('wiznote-token', null);
   pref('wiznote-account', null);
   await kvClear();
   location.reload();
 }
 
-// ---- Google Drive（只讀）----
+// ---- Google Drive ----
 
-async function drive(url) {
+async function drive(url, options = {}) {
   const t = token();
   if (!t) throw new AuthError('需要登入');
   let res;
   try {
-    res = await fetch(url, { headers: { Authorization: `Bearer ${t}` } });
+    res = await fetch(url, { ...options, headers: { ...options.headers, Authorization: `Bearer ${t}` } });
   } catch {
     throw new Error('無法連線，請確認網路');
   }
@@ -172,13 +184,85 @@ async function indexFiles() {
   const folders = await listFiles(`name='${MOBILE_FOLDER}' and mimeType='${FOLDER_MIME}' and trashed=false`, 'id,createdTime');
   if (!folders.length) return null;
   folders.sort((a, b) => (a.createdTime || '').localeCompare(b.createdTime || '') || a.id.localeCompare(b.id));
+  state.mobileFolder = folders[0].id;
   const files = await listFiles(`'${folders[0].id}' in parents and trashed=false`);
-  return { list: files.find((f) => f.name === LIST_FILE), search: files.find((f) => f.name === SEARCH_FILE) };
+  return {
+    list: files.find((f) => f.name === LIST_FILE),
+    search: files.find((f) => f.name === SEARCH_FILE),
+    requests: new Set(files.filter((f) => f.name.startsWith(REQUEST_PREFIX)).map((f) => f.name)),
+  };
 }
 
+// 電腦還沒處理的變更疊在索引上：刪除的先藏起來，最愛照手機上的選擇顯示
 function setNotes(notes) {
-  state.notes = notes;
-  state.byId = new Map(notes.map((n) => [n.id, n]));
+  state.raw = notes;
+  const fav = new Map();
+  const gone = new Set();
+  for (const p of state.pending) {
+    if (p.action === 'trash') gone.add(p.id);
+    else fav.set(p.id, p.on);
+  }
+  state.notes = notes.filter((n) => !gone.has(n.id)).map((n) => (fav.has(n.id) && !!n.v !== fav.get(n.id) ? { ...n, v: fav.get(n.id) ? 1 : 0 } : n));
+  state.byId = new Map(state.notes.map((n) => [n.id, n]));
+}
+
+// ---- 手機留給電腦的請求 ----
+
+const savePending = () => kvSet('pending', state.pending);
+
+async function queueRequest(action, id, on) {
+  // 還沒送出的同一篇最愛切換直接換掉，不必送兩次
+  if (action === 'favorite') state.pending = state.pending.filter((p) => p.sent || p.action !== 'favorite' || p.id !== id);
+  state.pending.push({
+    name: `${REQUEST_PREFIX}${Date.now()}-${crypto.randomUUID().slice(0, 8)}.json`,
+    action, id, ...(action === 'favorite' ? { on } : {}), at: new Date().toISOString(), sent: 0,
+  });
+  await savePending();
+  setNotes(state.raw);
+  renderHome();
+  sendPending();
+}
+
+async function uploadRequest(p) {
+  const { name, sent: _sent, ...req } = p;
+  const boundary = `wiz${crypto.randomUUID().replace(/-/g, '')}`;
+  const meta = JSON.stringify({ name, parents: [state.mobileFolder], mimeType: 'application/json' });
+  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ version: 1, ...req })}\r\n--${boundary}--`;
+  await drive(`${UPLOAD}?uploadType=multipart&fields=id`, { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
+}
+
+// 沒網路或登入過期時留在手機上，下次更新清單時再送
+async function sendPending({ quiet = false } = {}) {
+  if (state.sending || !token() || !state.pending.some((p) => !p.sent)) return;
+  state.sending = true;
+  try {
+    if (!state.mobileFolder) await indexFiles();
+    if (!state.mobileFolder) return;
+    for (const p of state.pending.filter((x) => !x.sent)) {
+      await uploadRequest(p);
+      p.sent = Date.now();
+      await savePending();
+    }
+  } catch (e) {
+    if (e instanceof AuthError) showLoginBanner();
+    else if (!quiet) toast('變更還沒送出，下次連上網路時會自動再送。');
+  } finally {
+    state.sending = false;
+  }
+}
+
+// 請求檔不見了代表電腦已經處理，而且清單是在那之後更新的，手機上的暫存可以拿掉
+function prunePending(found) {
+  const keep = state.pending.filter((p) => !p.sent || found.requests.has(p.name) || Date.now() - p.sent < REQUEST_GRACE);
+  if (keep.length === state.pending.length) return false;
+  state.pending = keep;
+  savePending();
+  return true;
+}
+
+function pendingNote() {
+  const n = state.pending.length;
+  return n ? `${n} 項變更等電腦同步後生效` : '';
 }
 
 async function refreshIndex() {
@@ -191,13 +275,20 @@ async function refreshIndex() {
       return;
     }
     state.searchSize = Number(found.search?.size || 0);
+    await sendPending({ quiet: true });
+    let changed = false;
     if (found.list.md5Checksum !== await kvGet('list-md5')) {
       const data = await gunzipJson(await media(found.list.id));
-      setNotes(data.notes);
+      state.raw = data.notes;
       state.folderOrder = data.folderOrder || {};
       await kvSet('folder-order', state.folderOrder);
       await kvSet('list', data.notes);
       await kvSet('list-md5', found.list.md5Checksum);
+      changed = true;
+    }
+    if (prunePending(found)) changed = true;
+    if (changed) {
+      setNotes(state.raw);
       renderHome();
     }
     // 已經下載過全文資料才自動更新；沒用過全文搜尋就不佔流量
@@ -348,7 +439,7 @@ function renderHome() {
   if (!state.shown.length && !topLevel) {
     let text = '沒有符合的筆記。';
     if (!state.notes.length) text = '正在等待筆記清單…';
-    else if (state.tab === 'fav' && !state.query.trim()) text = '還沒有我的最愛。在電腦版按愛心後會出現在這裡。';
+    else if (state.tab === 'fav' && !state.query.trim()) text = '還沒有我的最愛。打開文章按上方的愛心就會出現在這裡。';
     $('list').append(el('div', { className: 'empty', textContent: text }));
   }
   renderSearchButton();
@@ -575,7 +666,7 @@ async function showNote(n) {
   $('home-view').hidden = true;
   $('note-view').hidden = false;
   $('note-title').textContent = n.t;
-  $('note-fav').hidden = !n.v;
+  renderNoteFav(n);
   $('note-meta').textContent = [n.f, `建立 ${fmtDate(n.c)}`, `修改 ${fmtDate(n.m)}`].filter(Boolean).join('　');
   $('note-banner').hidden = true;
   $('note-body').replaceChildren(el('p', { className: 'muted', textContent: '載入中…' }));
@@ -607,6 +698,33 @@ async function showNote(n) {
   renderMarkup(marked.parse(stripFrontMatter(saved.md), { gfm: true }));
   renderActions(n, saved);
   await resolveImages(saved, n.id);
+}
+
+function renderNoteFav(n) {
+  const b = $('note-fav');
+  b.textContent = n.v ? '♥' : '♡';
+  b.classList.toggle('on', !!n.v);
+  b.setAttribute('aria-label', n.v ? '從我的最愛移除' : '加入我的最愛');
+  b.setAttribute('aria-pressed', String(!!n.v));
+}
+
+async function toggleNoteFavorite() {
+  const n = state.current;
+  if (!n) return;
+  const on = !n.v;
+  await queueRequest('favorite', n.id, on);
+  state.current = state.byId.get(n.id) || n;
+  renderNoteFav(state.current);
+  toast(on ? '已加入我的最愛，電腦同步後也會更新' : '已從我的最愛移除，電腦同步後也會更新');
+}
+
+async function trashCurrentNote() {
+  const n = state.current;
+  if (!n) return;
+  if (!confirm(`刪除「${n.t}」？\n\n電腦同步時會移到電腦版的回收桶，可以在電腦上還原。`)) return;
+  await queueRequest('trash', n.id);
+  history.back();
+  toast('已刪除，電腦同步時會移到回收桶');
 }
 
 function openNote(id) {
@@ -646,6 +764,7 @@ window.addEventListener('popstate', (e) => {
 async function openSheet() {
   $('sheet-account').textContent = pref('wiznote-account') ? `帳號：${pref('wiznote-account')}` : '';
   $('sheet-storage').textContent = '';
+  $('sheet-pending').textContent = pendingNote();
   $('sheet').hidden = false;
   try {
     const { usage } = await navigator.storage.estimate();
@@ -665,6 +784,8 @@ function bindEvents() {
   $('login').onclick = login;
   for (const t of document.querySelectorAll('.tab')) t.onclick = () => setTab(t.dataset.tab);
   $('note-back').onclick = () => history.back();
+  $('note-fav').onclick = toggleNoteFavorite;
+  $('note-trash').onclick = trashCurrentNote;
   $('folder-back').onclick = () => history.back();
   $('settings').onclick = openSheet;
   $('sheet-close').onclick = () => { $('sheet').hidden = true; };
@@ -678,7 +799,8 @@ function bindEvents() {
   $('clear-cache').onclick = async () => {
     await kvClear();
     state.searchText = null;
-    await kvSet('list', state.notes);
+    await savePending();
+    await kvSet('list', state.raw);
     await kvSet('folder-order', state.folderOrder);
     $('sheet').hidden = true;
     toast('已清除離線內容');
@@ -724,6 +846,7 @@ async function start() {
   state.tab = pref('wiznote-tab') || 'all';
   state.sort = pref('wiznote-sort') || 'm';
   state.order = pref('wiznote-order') || 'desc';
+  state.pending = (await kvGet('pending')) || [];
   const cached = await kvGet('list');
   if (cached) setNotes(cached);
   state.folderOrder = (await kvGet('folder-order')) || {};

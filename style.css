@@ -55,6 +55,9 @@ button.wide { display: block; width: calc(100% - 32px); margin: 8px 16px; }
 .folder-row .n { flex: 1; min-width: 0; font-weight: 600; }
 .folder-row .c { color: var(--muted); font-size: 14px; }
 .fav { color: var(--fav); }
+.fav-toggle { color: var(--muted); }
+.fav-toggle.on { color: var(--fav); }
+#note-trash { font-size: 20px; }
 #sentinel { height: 1px; }
 .empty { padding: 40px 24px; color: var(--muted); text-align: center; }
 
