@@ -17,6 +17,9 @@ const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
 const REQUEST_GRACE = 2 * 60 * 1000;
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const PAGE = 100;
+// 最上層的「封存」：不出現在全部筆記和一般搜尋，從分類點進去才看得到
+const ARCHIVE = '封存';
+const isArchived = (folder) => folder === ARCHIVE || folder.startsWith(`${ARCHIVE}/`);
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
@@ -391,6 +394,7 @@ function filtered() {
   const items = state.notes.filter((n) => {
     if (state.tab === 'fav' && !n.v) return false;
     if (inFolder && n.f !== state.folder && !n.f.startsWith(`${state.folder}/`)) return false;
+    if (!inFolder && state.tab !== 'fav' && isArchived(n.f)) return false;
     if (!words.length) return true;
     const hay = `${n.t}\n${n.s}\n${state.searchText?.[n.id] || ''}`.toLowerCase();
     return words.every((w) => hay.includes(w));
@@ -439,10 +443,14 @@ function renderFolders() {
   }
   // 和電腦版相同的手動排序；沒排過的依名稱排在後面
   const manual = state.folderOrder[state.folder] || [];
-  const rank = (name) => { const i = manual.indexOf(name); return i < 0 ? Infinity : i; };
+  const rank = (name) => {
+    if (!state.folder && name === ARCHIVE) return Infinity;
+    const i = manual.indexOf(name);
+    return i < 0 ? Number.MAX_SAFE_INTEGER : i;
+  };
   box.replaceChildren(...[...counts].sort((a, b) => (rank(a[0]) === rank(b[0]) ? a[0].localeCompare(b[0], 'zh-Hant') : rank(a[0]) - rank(b[0]))).map(([name, count]) => {
     const row = el('button', { className: 'folder-row', type: 'button' },
-      el('span', { className: 'n', textContent: name }), el('span', { className: 'c', textContent: count }), el('span', { className: 'c', textContent: '›' }));
+      el('span', { className: 'n', textContent: !state.folder && name === ARCHIVE ? `🗄 ${name}` : name }), el('span', { className: 'c', textContent: count }), el('span', { className: 'c', textContent: '›' }));
     row.dataset.folder = prefix + name;
     row.onclick = () => openFolder(prefix + name);
     return row;
@@ -699,6 +707,7 @@ async function showNote(n) {
   state.current = n;
   state.currentSaved = null;
   $('note-edit').disabled = true;
+  $('note-edit').hidden = !!n.r;
   $('home-view').hidden = true;
   $('note-view').hidden = false;
   $('note-title').textContent = n.t;
@@ -782,6 +791,8 @@ function fitEditor() {
 
 function setEditMode(on) {
   for (const id of ['note-back', 'note-fav', 'note-edit', 'note-trash', 'note-body', 'note-actions']) $(id).hidden = on;
+  // 自動產生的筆記（AI 對話）是唯讀的
+  if (state.current?.r) $('note-edit').hidden = true;
   for (const id of ['edit-cancel', 'edit-save', 'note-editor', 'edit-hint']) $(id).hidden = !on;
 }
 
